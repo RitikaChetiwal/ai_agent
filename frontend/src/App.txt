@@ -1,0 +1,1438 @@
+import { useState, useEffect, useRef } from 'react'
+import {
+  runAgent, listAlarms, sendEmail, scheduleEmail, listEmailTemplates, sendEmailTemplate, sendBulkTemplate, scheduleBulkTemplate, startAICall
+} from './api/agent'
+
+window.api = { sendEmail, scheduleEmail, startAICall };
+
+export default function App() {
+  const [goal, setGoal] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState(null)
+  const [error, setError] = useState('')
+  const [alarms, setAlarms] = useState([])
+
+  // email state
+  const [to, setTo] = useState('')
+  const [subject, setSubject] = useState('')
+  const [message, setMessage] = useState('')
+  const [emailResp, setEmailResp] = useState(null)
+
+  // template state
+  const [templates, setTemplates] = useState(["Template1", "Template2", "Template3"])
+  const [tplData, setTplData] = useState({})
+  const [previewTpl, setPreviewTpl] = useState(null)
+
+  const [bulkTo, setBulkTo] = useState("")
+  const [bulkTplId, setBulkTplId] = useState("")
+  const [bulkResp, setBulkResp] = useState(null)
+
+  // scheduling
+  const [sendLaterList, setSendLaterList] = useState(false);
+  const [whenList, setWhenList] = useState("");
+  const [relMinList, setRelMinList] = useState("");
+  const [sendLaterCSV, setSendLaterCSV] = useState(false);
+  const [whenCSV, setWhenCSV] = useState("");
+  const [relMinCSV, setRelMinCSV] = useState("");
+
+  // CSV state
+  const [csvHeaders, setCsvHeaders] = useState([])
+  const [csvRows, setCsvRows] = useState([])
+  const [csvToCol, setCsvToCol] = useState("")
+  const [csvMap, setCsvMap] = useState({})
+
+  const [bulkMode, setBulkMode] = useState('paste');
+  const [scheduleISO, setScheduleISO] = useState("");
+  const [draft, setDraft] = useState(null);
+
+  // NEW: Twilio/Voice features
+  const [activeTab, setActiveTab] = useState('agent'); // agent, email, bulk, voice, callers, history
+  const [callPhone, setCallPhone] = useState('');
+  const [callHistory, setCallHistory] = useState([]);
+  const [callers, setCallers] = useState([]);
+  const [selectedCall, setSelectedCall] = useState(null);
+  const [selectedCaller, setSelectedCaller] = useState(null);
+
+  // Studio reminders
+  const [reminderPhone, setReminderPhone] = useState('');
+  const [reminderName, setReminderName] = useState('');
+  const [reminderDate, setReminderDate] = useState('');
+  const [reminderTime, setReminderTime] = useState('');
+  const [reminderDoctor, setReminderDoctor] = useState('');
+
+  const canScheduleCSV = !busy
+    && !!bulkTplId && csvRows.length > 0
+    && !!csvToCol
+    && (!sendLaterCSV || (!!whenCSV || !!relMinCSV));
+
+  const audioRef = useRef(null);
+  const API = import.meta.env.VITE_API_BASE || 'http://localhost:5001';
+
+  // Load call history
+  const loadCallHistory = async () => {
+    try {
+      const response = await fetch(`${API}/twilio/voice/history?limit=50`);
+      const data = await response.json();
+      console.log('📞 Call History Response:', data);
+      if (data.length > 0) {
+        console.log('📞 First call structure:', data[0]);
+        console.log('📞 Available ID fields:', {
+          sid: data[0].sid,
+          callSid: data[0].callSid,
+          _id: data[0]._id
+        });
+      }
+      setCallHistory(Array.isArray(data) ? data : []);
+    } catch (e) {
+      console.error('Failed to load call history:', e);
+    }
+  };
+
+  // Load callers
+  const loadCallers = async () => {
+    try {
+      // This would need a backend endpoint - for now using mock
+      // In production, add GET /twilio/callers endpoint
+      setCallers([]);
+    } catch (e) {
+      console.error('Failed to load callers:', e);
+    }
+  };
+
+  useEffect(() => {
+    const es = new EventSource(`${API}/events`);
+    es.addEventListener("alarm", (ev) => {
+      const payload = JSON.parse(ev.data);
+      audioRef.current?.play?.();
+      if (Notification.permission === "granted") {
+        new Notification("Reminder", { body: payload.message });
+      }
+    });
+    return () => es.close();
+  }, []);
+
+  useEffect(() => {
+    if (Notification && Notification.permission === "default") {
+      Notification.requestPermission();
+    }
+  }, []);
+
+  // Load data when switching tabs
+  useEffect(() => {
+    if (activeTab === 'history') loadCallHistory();
+    if (activeTab === 'callers') loadCallers();
+  }, [activeTab]);
+
+  const onSendEmail = async () => {
+    setBusy(true); setError(''); setEmailResp(null);
+    try {
+      const cleanedTo = to.split(",").map(s => s.trim()).filter(Boolean);
+      if (cleanedTo.length === 0) {
+        throw new Error("Please enter at least one recipient email.");
+      }
+      const payload = {
+        to: cleanedTo.length === 1 ? cleanedTo[0] : cleanedTo,
+        subject: subject || "(no subject)",
+        text: message || "",
+      };
+      const data = await sendEmail(payload);
+      setEmailResp(data);
+    } catch (e) {
+      setError(String(e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onRun = async () => {
+    setBusy(true); setError(''); setResult(null)
+    try {
+      const data = await runAgent({ goal })
+      setResult(data)
+      const maybe = extractJsonObject(data?.output || "");
+      if (maybe && (maybe.type === "email_draft" || (maybe.subject && (maybe.text || maybe.html)))) {
+        const toArr = Array.isArray(maybe.to)
+          ? maybe.to
+          : typeof maybe.to === "string"
+            ? maybe.to.split(/[,;\n]/g).map(s => s.trim()).filter(Boolean)
+            : [];
+        setDraft({
+          to: toArr,
+          subject: maybe.subject || "",
+          text: maybe.text || "",
+          html: maybe.html || "",
+          send_at_iso: maybe.send_at_iso || ""
+        });
+        setScheduleISO(maybe.send_at_iso || "");
+      } else {
+        setDraft(null);
+        setScheduleISO("");
+      }
+    } catch (e) {
+      setError(String(e?.message || e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const onListAlarms = async () => {
+    setBusy(true);
+    setError('')
+    try {
+      const data = await runAgent({
+        goal: "List all alarms as JSON using the list_alarms tool and return only the JSON."
+      })
+      try {
+        const parsed = JSON.parse(data?.output || '{}')
+        setAlarms(parsed.items || [])
+      } catch {
+        const d = await listAlarms()
+        setAlarms(d.items || d.data || [])
+      }
+    } catch (e) {
+      setError(String(e?.message || e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // NEW: Start AI call
+  const onStartCall = async () => {
+    if (!callPhone.trim()) {
+      setError('Please enter a phone number');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      const data = await window.api.startAICall({
+        to: callPhone,
+        voiceId: 'amy',
+        firstMessage: 'Hello! This is an AI assistant calling you.'
+      });
+      setCallPhone('');
+      alert('Call initiated successfully!');
+      loadCallHistory(); // Refresh history
+    } catch (e) {
+      setError(String(e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // NEW: Start studio reminder call
+  const onStartStudioCall = async () => {
+    if (!reminderPhone || !reminderName) {
+      setError('Phone and name are required');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      const response = await fetch(`${API}/twilio/studio/trigger`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phone: reminderPhone,
+          name: reminderName,
+          date: reminderDate,
+          time: reminderTime,
+          doctor: reminderDoctor
+        })
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to start call: ${response.statusText}`);
+      }
+      const data = await response.json();
+      alert('Reminder call initiated!');
+      setReminderPhone('');
+      setReminderName('');
+      setReminderDate('');
+      setReminderTime('');
+      setReminderDoctor('');
+      loadCallHistory();
+    } catch (e) {
+      setError(String(e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onLoadTemplates = async () => {
+    setBusy(true); setError('');
+    try {
+      const data = await listEmailTemplates();
+      setTemplates(Array.isArray(data.templates) ? data.templates : []);
+    } catch (e) {
+      setError(String(e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onPreview = async (tplId) => {
+    if (!tplId) return;
+    setBusy(true); setError('');
+    try {
+      const rendered = await sendEmailTemplate({
+        template_id: tplId,
+        data: tplData,
+        to: "preview@example.com",
+        dry_run: true
+      });
+      setPreviewTpl(rendered);
+    } catch (e) {
+      setError(String(e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onSendTemplate = async (tplId) => {
+    if (!tplId) return;
+    const toArr = bulkTo.split(/[,;\n]/g).map(s => s.trim()).filter(Boolean);
+    if (toArr.length === 0) {
+      setError("Please enter at least one recipient.");
+      return;
+    }
+    setBusy(true); setError(''); setBulkResp(null);
+    try {
+      const data = await sendEmailTemplate({
+        template_id: tplId,
+        data: tplData,
+        to: toArr.length === 1 ? toArr[0] : toArr
+      });
+      setBulkResp(data);
+    } catch (e) {
+      setError(String(e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onSendBulk = async () => {
+    const toArr = bulkTo.split(/[,;\n]/g).map(s => s.trim()).filter(Boolean);
+    if (toArr.length === 0 || !bulkTplId) {
+      setError("Please provide recipients and template.");
+      return;
+    }
+    setBusy(true); setError(''); setBulkResp(null);
+    try {
+      let data;
+      if (sendLaterList && (whenList || relMinList)) {
+        data = await scheduleBulkTemplate({
+          template_id: bulkTplId,
+          recipients: toArr.map(email => ({ email, data: tplData })),
+          whenISO: whenList || undefined,
+          relativeMinutes: relMinList ? parseInt(relMinList, 10) : undefined
+        });
+      } else {
+        data = await sendBulkTemplate({
+          template_id: bulkTplId,
+          recipients: toArr.map(email => ({ email, data: tplData }))
+        });
+      }
+      setBulkResp(data);
+    } catch (e) {
+      setError(String(e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onFileChange = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      const text = evt.target?.result;
+      if (typeof text !== "string") return;
+      const lines = text.trim().split("\n");
+      if (lines.length === 0) return;
+      const headers = lines[0].split(",").map(s => s.trim());
+      const rows = lines.slice(1).map(line => {
+        const cells = line.split(",").map(s => s.trim());
+        const row = {};
+        headers.forEach((h, i) => { row[h] = cells[i] || ""; });
+        return row;
+      });
+      setCsvHeaders(headers);
+      setCsvRows(rows);
+    };
+    reader.readAsText(file);
+  };
+
+  const onScheduleCSV = async () => {
+    if (!canScheduleCSV) return;
+    setBusy(true); setError(''); setBulkResp(null);
+    try {
+      const recipients = csvRows.map(row => {
+        const emailVal = row[csvToCol];
+        const dataObj = { ...tplData };
+        Object.keys(csvMap).forEach(tplVar => {
+          const csvCol = csvMap[tplVar];
+          if (csvCol && row[csvCol] !== undefined) {
+            dataObj[tplVar] = row[csvCol];
+          }
+        });
+        return { email: emailVal, data: dataObj };
+      });
+      const data = await scheduleBulkTemplate({
+        template_id: bulkTplId,
+        recipients,
+        whenISO: whenCSV || undefined,
+        relativeMinutes: relMinCSV ? parseInt(relMinCSV, 10) : undefined
+      });
+      setBulkResp(data);
+    } catch (e) {
+      setError(String(e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  function extractJsonObject(str) {
+    try {
+      const cleaned = str.replace(/```json\s*/g, "").replace(/```\s*/g, "");
+      const matches = cleaned.match(/\{[\s\S]*\}/);
+      if (!matches) return null;
+      return JSON.parse(matches[0]);
+    } catch {
+      return null;
+    }
+  }
+
+  const formatDuration = (seconds) => {
+    if (!seconds) return 'N/A';
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}m ${secs}s`;
+  };
+
+  const formatDate = (dateString) => {
+    if (!dateString) return 'N/A';
+    try {
+      return new Date(dateString).toLocaleString();
+    } catch {
+      return dateString;
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 relative overflow-hidden">
+      {/* Animated Background Elements */}
+      <div className="absolute inset-0 overflow-hidden pointer-events-none">
+        <div className="absolute w-96 h-96 bg-purple-500/20 rounded-full blur-3xl animate-float" style={{ top: '10%', left: '10%' }} />
+        <div className="absolute w-96 h-96 bg-blue-500/20 rounded-full blur-3xl animate-float" style={{ top: '60%', right: '10%', animationDelay: '2s' }} />
+        <div className="absolute w-96 h-96 bg-pink-500/20 rounded-full blur-3xl animate-float" style={{ bottom: '10%', left: '50%', animationDelay: '4s' }} />
+      </div>
+
+      <div className="relative z-10 max-w-7xl mx-auto p-6">
+        {/* Header */}
+        <header className="text-center mb-12 animate-slideUp">
+          <h1 className="text-6xl font-bold bg-gradient-to-r from-purple-400 via-pink-400 to-blue-400 bg-clip-text text-transparent mb-4">
+            🤖 AI Agent Console
+          </h1>
+          <p className="text-gray-300 text-lg">Intelligent Automation & Communication Platform</p>
+        </header>
+
+        {/* Navigation Tabs */}
+        <nav className="flex flex-wrap gap-3 mb-8 backdrop-blur-xl bg-white/5 p-3 rounded-2xl border border-white/10 shadow-2xl animate-slideUp">
+          {['agent', 'email', 'bulk', 'voice', 'history', 'callers'].map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`flex-1 min-w-[120px] px-6 py-3 rounded-xl font-semibold transition-all duration-300 transform hover:scale-105 ${
+                activeTab === tab
+                  ? 'bg-gradient-to-r from-purple-500 to-pink-500 text-white shadow-lg shadow-purple-500/50'
+                  : 'bg-white/5 text-gray-300 hover:bg-white/10 border border-white/10'
+              }`}
+            >
+              {tab === 'agent' && '🤖 Agent'}
+              {tab === 'email' && '✉️ Email'}
+              {tab === 'bulk' && '📧 Bulk'}
+              {tab === 'voice' && '📞 Voice'}
+              {tab === 'history' && '📜 History'}
+              {tab === 'callers' && '👥 Callers'}
+            </button>
+          ))}
+        </nav>
+
+        {/* Agent Tab */}
+        {activeTab === 'agent' && (
+          <section className="backdrop-blur-xl bg-white/10 rounded-3xl p-8 border border-white/20 shadow-2xl mb-8 animate-fadeIn">
+            <h2 className="text-3xl font-bold text-white mb-6 flex items-center gap-3">
+              <span>🎯</span>
+              <span>AI Task Agent</span>
+            </h2>
+
+            <div className="space-y-4 mb-6">
+              <label className="block">
+                <span className="text-white font-semibold mb-2 block">What would you like me to do?</span>
+                <input
+                  type="text"
+                  className="w-full px-5 py-4 rounded-xl bg-white/10 border border-white/20 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all backdrop-blur-xl"
+                  placeholder="e.g., Send an email reminder for the team meeting tomorrow"
+                  value={goal}
+                  onChange={(e) => setGoal(e.target.value)}
+                  disabled={busy}
+                />
+              </label>
+
+              <button
+                onClick={onRun}
+                disabled={busy || !goal.trim()}
+                className="w-full px-6 py-4 rounded-xl font-bold text-white bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 shadow-lg shadow-purple-500/50 transform hover:scale-105"
+              >
+                {busy ? '⏳ Processing...' : '🚀 Execute Task'}
+              </button>
+            </div>
+
+            {result && (
+              <div className="mt-6 p-6 rounded-2xl bg-gradient-to-br from-green-500/20 to-emerald-500/20 border border-green-500/30 backdrop-blur-xl animate-scaleIn">
+                <h3 className="text-xl font-bold text-green-300 mb-3 flex items-center gap-2">
+                  <span>✅</span>
+                  <span>Result</span>
+                </h3>
+                <pre className="text-gray-200 whitespace-pre-wrap text-sm bg-black/30 p-4 rounded-xl overflow-auto max-h-96">
+                  {JSON.stringify(result, null, 2)}
+                </pre>
+              </div>
+            )}
+
+            <div className="mt-8 pt-6 border-t border-white/20">
+              <button
+                onClick={onListAlarms}
+                disabled={busy}
+                className="px-6 py-3 rounded-xl font-semibold text-white bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 disabled:opacity-50 transition-all duration-300 shadow-lg transform hover:scale-105"
+              >
+                🔔 List Active Alarms
+              </button>
+
+              {alarms.length > 0 && (
+                <div className="mt-6 space-y-3">
+                  <h3 className="text-xl font-bold text-white flex items-center gap-2">
+                    <span>📋</span>
+                    <span>Active Alarms</span>
+                  </h3>
+                  {alarms.map((a, i) => (
+                    <div key={i} className="p-4 rounded-xl bg-white/5 border border-white/10 backdrop-blur-xl hover:bg-white/10 transition-all">
+                      <p className="text-white font-medium">{a.message || 'No message'}</p>
+                      <small className="text-gray-400">Trigger: {a.when || 'Unknown'}</small>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+
+        {/* Email Tab */}
+        {activeTab === 'email' && (
+          <section className="backdrop-blur-xl bg-white/10 rounded-3xl p-8 border border-white/20 shadow-2xl mb-8 animate-fadeIn">
+            <h2 className="text-3xl font-bold text-white mb-6 flex items-center gap-3">
+              <span>✉️</span>
+              <span>Send Email</span>
+            </h2>
+
+            <div className="space-y-4">
+              <label className="block">
+                <span className="text-white font-semibold mb-2 block">To (comma-separated)</span>
+                <input
+                  type="text"
+                  className="w-full px-5 py-3 rounded-xl bg-white/10 border border-white/20 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all backdrop-blur-xl"
+                  placeholder="recipient@example.com, another@example.com"
+                  value={to}
+                  onChange={(e) => setTo(e.target.value)}
+                  disabled={busy}
+                />
+              </label>
+
+              <label className="block">
+                <span className="text-white font-semibold mb-2 block">Subject</span>
+                <input
+                  type="text"
+                  className="w-full px-5 py-3 rounded-xl bg-white/10 border border-white/20 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all backdrop-blur-xl"
+                  placeholder="Email subject"
+                  value={subject}
+                  onChange={(e) => setSubject(e.target.value)}
+                  disabled={busy}
+                />
+              </label>
+
+              <label className="block">
+                <span className="text-white font-semibold mb-2 block">Message</span>
+                <textarea
+                  className="w-full px-5 py-3 rounded-xl bg-white/10 border border-white/20 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all backdrop-blur-xl resize-none"
+                  rows={8}
+                  placeholder="Your message here..."
+                  value={message}
+                  onChange={(e) => setMessage(e.target.value)}
+                  disabled={busy}
+                />
+              </label>
+
+              <button
+                onClick={onSendEmail}
+                disabled={busy || !to.trim()}
+                className="w-full px-6 py-4 rounded-xl font-bold text-white bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 shadow-lg shadow-purple-500/50 transform hover:scale-105"
+              >
+                {busy ? '⏳ Sending...' : '📤 Send Email'}
+              </button>
+            </div>
+
+            {emailResp && (
+              <div className="mt-6 p-6 rounded-2xl bg-gradient-to-br from-green-500/20 to-emerald-500/20 border border-green-500/30 backdrop-blur-xl animate-scaleIn">
+                <h3 className="text-xl font-bold text-green-300 mb-3 flex items-center gap-2">
+                  <span>✅</span>
+                  <span>Email Sent Successfully</span>
+                </h3>
+                <pre className="text-gray-200 whitespace-pre-wrap text-sm bg-black/30 p-4 rounded-xl">
+                  {JSON.stringify(emailResp, null, 2)}
+                </pre>
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* Bulk Tab */}
+        {activeTab === 'bulk' && (
+          <section className="backdrop-blur-xl bg-white/10 rounded-3xl p-8 border border-white/20 shadow-2xl mb-8 animate-fadeIn">
+            <h2 className="text-3xl font-bold text-white mb-6 flex items-center gap-3">
+              <span>📧</span>
+              <span>Bulk Email Templates</span>
+            </h2>
+
+            <div className="flex gap-3 mb-6">
+              <button
+                onClick={() => setBulkMode('paste')}
+                className={`px-6 py-3 rounded-xl font-semibold transition-all ${
+                  bulkMode === 'paste'
+                    ? 'bg-gradient-to-r from-purple-500 to-pink-500 text-white shadow-lg'
+                    : 'bg-white/5 text-gray-300 hover:bg-white/10 border border-white/10'
+                }`}
+              >
+                📝 Paste Recipients
+              </button>
+              <button
+                onClick={() => setBulkMode('csv')}
+                className={`px-6 py-3 rounded-xl font-semibold transition-all ${
+                  bulkMode === 'csv'
+                    ? 'bg-gradient-to-r from-purple-500 to-pink-500 text-white shadow-lg'
+                    : 'bg-white/5 text-gray-300 hover:bg-white/10 border border-white/10'
+                }`}
+              >
+                📊 CSV Upload
+              </button>
+            </div>
+
+            {bulkMode === 'paste' && (
+              <div className="space-y-4">
+                <button
+                  onClick={onLoadTemplates}
+                  disabled={busy}
+                  className="px-6 py-3 rounded-xl font-semibold text-white bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 disabled:opacity-50 transition-all shadow-lg"
+                >
+                  🔄 Load Templates
+                </button>
+
+                <label className="block">
+                  <span className="text-white font-semibold mb-2 block">Template ID</span>
+                  <input
+                    type="text"
+                    className="w-full px-5 py-3 rounded-xl bg-white/10 border border-white/20 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all backdrop-blur-xl"
+                    placeholder="Enter template ID"
+                    value={bulkTplId}
+                    onChange={(e) => setBulkTplId(e.target.value)}
+                    disabled={busy}
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="text-white font-semibold mb-2 block">Recipients (one per line or comma-separated)</span>
+                  <textarea
+                    className="w-full px-5 py-3 rounded-xl bg-white/10 border border-white/20 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all backdrop-blur-xl resize-none"
+                    rows={6}
+                    placeholder="user1@example.com&#10;user2@example.com"
+                    value={bulkTo}
+                    onChange={(e) => setBulkTo(e.target.value)}
+                    disabled={busy}
+                  />
+                </label>
+
+                <label className="flex items-center gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={sendLaterList}
+                    onChange={(e) => setSendLaterList(e.target.checked)}
+                    className="w-5 h-5 rounded border-white/20 bg-white/10 checked:bg-purple-500"
+                  />
+                  <span className="text-white font-semibold">Schedule for later</span>
+                </label>
+
+                {sendLaterList && (
+                  <div className="grid grid-cols-2 gap-4">
+                    <label className="block">
+                      <span className="text-white font-semibold mb-2 block">When (ISO)</span>
+                      <input
+                        type="datetime-local"
+                        className="w-full px-5 py-3 rounded-xl bg-white/10 border border-white/20 text-white focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all backdrop-blur-xl"
+                        value={whenList}
+                        onChange={(e) => setWhenList(e.target.value)}
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="text-white font-semibold mb-2 block">Or relative minutes</span>
+                      <input
+                        type="number"
+                        className="w-full px-5 py-3 rounded-xl bg-white/10 border border-white/20 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all backdrop-blur-xl"
+                        placeholder="e.g., 60"
+                        value={relMinList}
+                        onChange={(e) => setRelMinList(e.target.value)}
+                      />
+                    </label>
+                  </div>
+                )}
+
+                <button
+                  onClick={onSendBulk}
+                  disabled={busy || !bulkTplId || !bulkTo.trim()}
+                  className="w-full px-6 py-4 rounded-xl font-bold text-white bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 shadow-lg shadow-purple-500/50 transform hover:scale-105"
+                >
+                  {busy ? '⏳ Processing...' : sendLaterList ? '📅 Schedule Bulk Send' : '🚀 Send Bulk'}
+                </button>
+              </div>
+            )}
+
+            {bulkMode === 'csv' && (
+              <div className="space-y-4">
+                <label className="block">
+                  <span className="text-white font-semibold mb-2 block">Upload CSV</span>
+                  <input
+                    type="file"
+                    accept=".csv"
+                    onChange={onFileChange}
+                    className="w-full px-5 py-3 rounded-xl bg-white/10 border border-white/20 text-white file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-purple-500 file:text-white hover:file:bg-purple-600 transition-all backdrop-blur-xl"
+                  />
+                </label>
+
+                {csvHeaders.length > 0 && (
+                  <>
+                    <div className="p-4 rounded-xl bg-white/5 border border-white/10 backdrop-blur-xl">
+                      <p className="text-white font-semibold mb-2">Found {csvRows.length} rows with columns:</p>
+                      <p className="text-gray-300 text-sm">{csvHeaders.join(', ')}</p>
+                    </div>
+
+                    <label className="block">
+                      <span className="text-white font-semibold mb-2 block">Template ID</span>
+                      <input
+                        type="text"
+                        className="w-full px-5 py-3 rounded-xl bg-white/10 border border-white/20 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all backdrop-blur-xl"
+                        placeholder="Enter template ID"
+                        value={bulkTplId}
+                        onChange={(e) => setBulkTplId(e.target.value)}
+                      />
+                    </label>
+
+                    <label className="block">
+                      <span className="text-white font-semibold mb-2 block">Email column name</span>
+                      <select
+                        className="w-full px-5 py-3 rounded-xl bg-white/10 border border-white/20 text-white focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all backdrop-blur-xl"
+                        value={csvToCol}
+                        onChange={(e) => setCsvToCol(e.target.value)}
+                      >
+                        <option value="">-- Select --</option>
+                        {csvHeaders.map((h) => (
+                          <option key={h} value={h}>{h}</option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={sendLaterCSV}
+                        onChange={(e) => setSendLaterCSV(e.target.checked)}
+                        className="w-5 h-5 rounded border-white/20 bg-white/10 checked:bg-purple-500"
+                      />
+                      <span className="text-white font-semibold">Schedule for later</span>
+                    </label>
+
+                    {sendLaterCSV && (
+                      <div className="grid grid-cols-2 gap-4">
+                        <label className="block">
+                          <span className="text-white font-semibold mb-2 block">When (ISO)</span>
+                          <input
+                            type="datetime-local"
+                            className="w-full px-5 py-3 rounded-xl bg-white/10 border border-white/20 text-white focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all backdrop-blur-xl"
+                            value={whenCSV}
+                            onChange={(e) => setWhenCSV(e.target.value)}
+                          />
+                        </label>
+                        <label className="block">
+                          <span className="text-white font-semibold mb-2 block">Or relative minutes</span>
+                          <input
+                            type="number"
+                            className="w-full px-5 py-3 rounded-xl bg-white/10 border border-white/20 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all backdrop-blur-xl"
+                            placeholder="e.g., 60"
+                            value={relMinCSV}
+                            onChange={(e) => setRelMinCSV(e.target.value)}
+                          />
+                        </label>
+                      </div>
+                    )}
+
+                    <button
+                      onClick={onScheduleCSV}
+                      disabled={!canScheduleCSV}
+                      className="w-full px-6 py-4 rounded-xl font-bold text-white bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 shadow-lg shadow-purple-500/50 transform hover:scale-105"
+                    >
+                      {busy ? '⏳ Processing...' : '🚀 Schedule CSV Bulk Send'}
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+
+            {bulkResp && (
+              <div className="mt-6 p-6 rounded-2xl bg-gradient-to-br from-green-500/20 to-emerald-500/20 border border-green-500/30 backdrop-blur-xl animate-scaleIn">
+                <h3 className="text-xl font-bold text-green-300 mb-3 flex items-center gap-2">
+                  <span>✅</span>
+                  <span>Bulk Operation Completed</span>
+                </h3>
+                <pre className="text-gray-200 whitespace-pre-wrap text-sm bg-black/30 p-4 rounded-xl">
+                  {JSON.stringify(bulkResp, null, 2)}
+                </pre>
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* Voice Tab */}
+        {activeTab === 'voice' && (
+          <section className="backdrop-blur-xl bg-white/10 rounded-3xl p-8 border border-white/20 shadow-2xl mb-8 animate-fadeIn">
+            <h2 className="text-3xl font-bold text-white mb-6 flex items-center gap-3">
+              <span>📞</span>
+              <span>Voice Calls</span>
+            </h2>
+
+            <div className="grid md:grid-cols-2 gap-8">
+              {/* AI Call */}
+              <div className="p-6 rounded-2xl bg-gradient-to-br from-blue-500/10 to-cyan-500/10 border border-blue-500/30 backdrop-blur-xl">
+                <h3 className="text-2xl font-bold text-white mb-4 flex items-center gap-2">
+                  <span>🤖</span>
+                  <span>AI Call</span>
+                </h3>
+                <div className="space-y-4">
+                  <label className="block">
+                    <span className="text-white font-semibold mb-2 block">Phone Number</span>
+                    <input
+                      type="tel"
+                      className="w-full px-5 py-3 rounded-xl bg-white/10 border border-white/20 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all backdrop-blur-xl"
+                      placeholder="+1234567890"
+                      value={callPhone}
+                      onChange={(e) => setCallPhone(e.target.value)}
+                      disabled={busy}
+                    />
+                  </label>
+                  <button
+                    onClick={onStartCall}
+                    disabled={busy || !callPhone.trim()}
+                    className="w-full px-6 py-4 rounded-xl font-bold text-white bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 shadow-lg shadow-blue-500/50 transform hover:scale-105"
+                  >
+                    {busy ? '⏳ Calling...' : '📞 Start AI Call'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Studio Reminder */}
+              <div className="p-6 rounded-2xl bg-gradient-to-br from-purple-500/10 to-pink-500/10 border border-purple-500/30 backdrop-blur-xl">
+                <h3 className="text-2xl font-bold text-white mb-4 flex items-center gap-2">
+                  <span>🏥</span>
+                  <span>Appointment Reminder</span>
+                </h3>
+                <div className="space-y-4">
+                  <label className="block">
+                    <span className="text-white font-semibold mb-2 block">Phone</span>
+                    <input
+                      type="tel"
+                      className="w-full px-5 py-3 rounded-xl bg-white/10 border border-white/20 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all backdrop-blur-xl"
+                      placeholder="+1234567890"
+                      value={reminderPhone}
+                      onChange={(e) => setReminderPhone(e.target.value)}
+                      disabled={busy}
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="text-white font-semibold mb-2 block">Patient Name</span>
+                    <input
+                      type="text"
+                      className="w-full px-5 py-3 rounded-xl bg-white/10 border border-white/20 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all backdrop-blur-xl"
+                      placeholder="John Doe"
+                      value={reminderName}
+                      onChange={(e) => setReminderName(e.target.value)}
+                      disabled={busy}
+                    />
+                  </label>
+                  <div className="grid grid-cols-2 gap-3">
+                    <label className="block">
+                      <span className="text-white font-semibold mb-2 block">Date</span>
+                      <input
+                        type="date"
+                        className="w-full px-5 py-3 rounded-xl bg-white/10 border border-white/20 text-white focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all backdrop-blur-xl"
+                        value={reminderDate}
+                        onChange={(e) => setReminderDate(e.target.value)}
+                        disabled={busy}
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="text-white font-semibold mb-2 block">Time</span>
+                      <input
+                        type="time"
+                        className="w-full px-5 py-3 rounded-xl bg-white/10 border border-white/20 text-white focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all backdrop-blur-xl"
+                        value={reminderTime}
+                        onChange={(e) => setReminderTime(e.target.value)}
+                        disabled={busy}
+                      />
+                    </label>
+                  </div>
+                  <label className="block">
+                    <span className="text-white font-semibold mb-2 block">Doctor (optional)</span>
+                    <input
+                      type="text"
+                      className="w-full px-5 py-3 rounded-xl bg-white/10 border border-white/20 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all backdrop-blur-xl"
+                      placeholder="Dr. Smith"
+                      value={reminderDoctor}
+                      onChange={(e) => setReminderDoctor(e.target.value)}
+                      disabled={busy}
+                    />
+                  </label>
+                  <button
+                    onClick={onStartStudioCall}
+                    disabled={busy || !reminderPhone.trim() || !reminderName.trim()}
+                    className="w-full px-6 py-4 rounded-xl font-bold text-white bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 shadow-lg shadow-purple-500/50 transform hover:scale-105"
+                  >
+                    {busy ? '⏳ Calling...' : '📞 Send Reminder'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {/* Call History Tab */}
+        {activeTab === 'history' && (
+          <section className="backdrop-blur-xl bg-white/10 rounded-3xl p-8 border border-white/20 shadow-2xl mb-8 animate-fadeIn">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-3xl font-bold text-white flex items-center gap-3">
+                <span>📜</span>
+                <span>Call History</span>
+              </h2>
+              <button
+                onClick={loadCallHistory}
+                disabled={busy}
+                className="px-6 py-3 rounded-xl font-semibold text-white bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 disabled:opacity-50 transition-all shadow-lg transform hover:scale-105"
+              >
+                🔄 Refresh
+              </button>
+            </div>
+
+            {callHistory.length === 0 ? (
+              <div className="text-center py-16">
+                <div className="text-6xl mb-4">📭</div>
+                <p className="text-gray-300 text-lg">No call history available</p>
+              </div>
+            ) : (
+              <div className="grid gap-4">
+                {callHistory.map((call) => {
+                  const callId = call.sid || call.callSid || call._id || 'unknown';
+                  const statusColor = 
+                    call.status === 'completed' ? 'from-green-500/20 to-emerald-500/20 border-green-500/30' :
+                    call.status === 'in-progress' ? 'from-blue-500/20 to-cyan-500/20 border-blue-500/30' :
+                    call.status === 'failed' ? 'from-red-500/20 to-pink-500/20 border-red-500/30' :
+                    'from-gray-500/20 to-slate-500/20 border-gray-500/30';
+                  
+                  return (
+                    <div
+                      key={callId}
+                      className={`p-6 rounded-2xl bg-gradient-to-br ${statusColor} border backdrop-blur-xl hover:scale-[1.02] transition-all duration-300 cursor-pointer`}
+                      onClick={() => setSelectedCall(call)}
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-3 mb-3">
+                            <span className="text-3xl">
+                              {call.direction === 'inbound' ? '📥' : '📤'}
+                            </span>
+                            <div>
+                              <h3 className="text-xl font-bold text-white">
+                                {call.direction === 'inbound' ? call.from : call.to}
+                              </h3>
+                              <p className="text-gray-300 text-sm">
+                                {call.direction === 'inbound' ? 'from' : 'to'}: {call.direction === 'inbound' ? call.to : call.from}
+                              </p>
+                            </div>
+                          </div>
+                          
+                          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                            <div>
+                              <p className="text-gray-400 font-medium">Status</p>
+                              <p className="text-white font-semibold capitalize">{call.status}</p>
+                            </div>
+                            <div>
+                              <p className="text-gray-400 font-medium">Duration</p>
+                              <p className="text-white font-semibold">{formatDuration(call.duration)}</p>
+                            </div>
+                            <div>
+                              <p className="text-gray-400 font-medium">Date</p>
+                              <p className="text-white font-semibold">{formatDate(call.startTime)}</p>
+                            </div>
+                            <div>
+                              <p className="text-gray-400 font-medium">Type</p>
+                              <p className="text-white font-semibold capitalize">{call.direction}</p>
+                            </div>
+                          </div>
+                        </div>
+                        
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedCall(call);
+                          }}
+                          className="ml-4 px-4 py-2 rounded-lg bg-white/10 hover:bg-white/20 text-white font-semibold transition-all border border-white/20"
+                        >
+                          View Details
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* Callers Tab */}
+        {activeTab === 'callers' && (
+          <section className="backdrop-blur-xl bg-white/10 rounded-3xl p-8 border border-white/20 shadow-2xl mb-8 animate-fadeIn">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-3xl font-bold text-white flex items-center gap-3">
+                <span>👥</span>
+                <span>Callers</span>
+              </h2>
+              <button
+                onClick={loadCallers}
+                disabled={busy}
+                className="px-6 py-3 rounded-xl font-semibold text-white bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 disabled:opacity-50 transition-all shadow-lg transform hover:scale-105"
+              >
+                🔄 Refresh
+              </button>
+            </div>
+
+            {callers.length === 0 ? (
+              <div className="text-center py-16">
+                <div className="text-6xl mb-4">👤</div>
+                <p className="text-gray-300 text-lg">No callers found</p>
+                <p className="text-gray-400 text-sm mt-2">Callers will appear here once they interact with your system</p>
+              </div>
+            ) : (
+              <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {callers.map((caller) => (
+                  <div
+                    key={caller.phone}
+                    className="p-6 rounded-2xl bg-gradient-to-br from-purple-500/10 to-pink-500/10 border border-purple-500/30 backdrop-blur-xl hover:scale-105 transition-all duration-300 cursor-pointer"
+                    onClick={() => setSelectedCaller(caller)}
+                  >
+                    <div className="flex items-center gap-4 mb-4">
+                      <div className="w-16 h-16 rounded-full bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center text-3xl">
+                        👤
+                      </div>
+                      <div>
+                        <h3 className="text-xl font-bold text-white">{caller.name || 'Unknown'}</h3>
+                        <p className="text-gray-300 text-sm">{caller.phone}</p>
+                      </div>
+                    </div>
+                    <div className="space-y-2 text-sm">
+                      <div className="flex justify-between">
+                        <span className="text-gray-400">Total Calls:</span>
+                        <span className="text-white font-semibold">{caller.totalCalls || 0}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-400">Last Called:</span>
+                        <span className="text-white font-semibold">{formatDate(caller.lastCall)}</span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* Call Details Modal */}
+        {selectedCall && (
+          <div 
+            className="fixed inset-0 bg-black/70 backdrop-blur-md flex items-center justify-center z-50 p-4 animate-fadeIn" 
+            onClick={() => setSelectedCall(null)}
+          >
+            <div 
+              className="bg-gradient-to-br from-slate-900 to-purple-900 rounded-3xl w-full max-w-4xl max-h-[90vh] overflow-hidden shadow-2xl border border-purple-500/30 animate-scaleIn"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Modal Header */}
+              <div className="bg-gradient-to-r from-purple-600 via-pink-600 to-blue-600 p-6 flex items-center justify-between">
+                <div className="flex items-center gap-4">
+                  <div className="w-14 h-14 rounded-full bg-white/20 backdrop-blur-xl flex items-center justify-center text-3xl">
+                    {selectedCall.direction === 'inbound' ? '📥' : '📤'}
+                  </div>
+                  <div>
+                    <h3 className="text-2xl font-bold text-white">Call Details</h3>
+                    <p className="text-purple-200 text-sm">
+                      {selectedCall.direction === 'inbound' ? 'Inbound Call' : 'Outbound Call'}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  className="w-12 h-12 rounded-xl bg-white/20 hover:bg-white/30 text-white flex items-center justify-center transition-all duration-200 backdrop-blur-xl"
+                  onClick={() => setSelectedCall(null)}
+                >
+                  <span className="text-2xl">✕</span>
+                </button>
+              </div>
+
+              {/* Modal Content */}
+              <div className="p-8 overflow-y-auto max-h-[calc(90vh-180px)]">
+                {/* Primary Info Cards */}
+                <div className="grid md:grid-cols-2 gap-6 mb-8">
+                  <div className="p-6 rounded-2xl bg-gradient-to-br from-blue-500/20 to-cyan-500/20 border border-blue-500/30 backdrop-blur-xl">
+                    <div className="flex items-center gap-3 mb-4">
+                      <span className="text-3xl">📞</span>
+                      <h4 className="text-xl font-bold text-white">Contact Information</h4>
+                    </div>
+                    <div className="space-y-3">
+                      <div>
+                        <p className="text-gray-400 text-sm font-medium mb-1">From</p>
+                        <p className="text-white text-lg font-semibold">{selectedCall.from}</p>
+                      </div>
+                      <div>
+                        <p className="text-gray-400 text-sm font-medium mb-1">To</p>
+                        <p className="text-white text-lg font-semibold">{selectedCall.to}</p>
+                      </div>
+                      <div>
+                        <p className="text-gray-400 text-sm font-medium mb-1">Direction</p>
+                        <span className="inline-block px-3 py-1 rounded-full bg-blue-500/30 text-blue-200 text-sm font-semibold capitalize">
+                          {selectedCall.direction}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="p-6 rounded-2xl bg-gradient-to-br from-purple-500/20 to-pink-500/20 border border-purple-500/30 backdrop-blur-xl">
+                    <div className="flex items-center gap-3 mb-4">
+                      <span className="text-3xl">📊</span>
+                      <h4 className="text-xl font-bold text-white">Call Statistics</h4>
+                    </div>
+                    <div className="space-y-3">
+                      <div>
+                        <p className="text-gray-400 text-sm font-medium mb-1">Status</p>
+                        <span className={`inline-block px-3 py-1 rounded-full text-sm font-semibold capitalize ${
+                          selectedCall.status === 'completed' ? 'bg-green-500/30 text-green-200' :
+                          selectedCall.status === 'in-progress' ? 'bg-blue-500/30 text-blue-200' :
+                          selectedCall.status === 'failed' ? 'bg-red-500/30 text-red-200' :
+                          'bg-gray-500/30 text-gray-200'
+                        }`}>
+                          {selectedCall.status}
+                        </span>
+                      </div>
+                      <div>
+                        <p className="text-gray-400 text-sm font-medium mb-1">Duration</p>
+                        <p className="text-white text-lg font-semibold">{formatDuration(selectedCall.duration)}</p>
+                      </div>
+                      <div>
+                        <p className="text-gray-400 text-sm font-medium mb-1">Started</p>
+                        <p className="text-white text-lg font-semibold">{formatDate(selectedCall.startTime)}</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Technical Details */}
+                <div className="p-6 rounded-2xl bg-gradient-to-br from-slate-800/50 to-purple-800/50 border border-white/10 backdrop-blur-xl mb-6">
+                  <div className="flex items-center gap-3 mb-4">
+                    <span className="text-3xl">🔧</span>
+                    <h4 className="text-xl font-bold text-white">Technical Details</h4>
+                  </div>
+                  <div className="grid md:grid-cols-3 gap-4">
+                    <div>
+                      <p className="text-gray-400 text-sm font-medium mb-1">Call SID</p>
+                      <p className="text-white text-sm font-mono bg-black/30 px-3 py-2 rounded-lg break-all">
+                        {selectedCall.sid || selectedCall.callSid || 'N/A'}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-gray-400 text-sm font-medium mb-1">Account SID</p>
+                      <p className="text-white text-sm font-mono bg-black/30 px-3 py-2 rounded-lg break-all">
+                        {selectedCall.accountSid || 'N/A'}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-gray-400 text-sm font-medium mb-1">API Version</p>
+                      <p className="text-white text-sm font-mono bg-black/30 px-3 py-2 rounded-lg">
+                        {selectedCall.apiVersion || 'N/A'}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Transcript or Recording */}
+                {(selectedCall.transcript || selectedCall.recordingUrl) && (
+                  <div className="p-6 rounded-2xl bg-gradient-to-br from-green-500/20 to-emerald-500/20 border border-green-500/30 backdrop-blur-xl">
+                    <div className="flex items-center gap-3 mb-4">
+                      <span className="text-3xl">💬</span>
+                      <h4 className="text-xl font-bold text-white">
+                        {selectedCall.transcript ? 'Transcript' : 'Recording'}
+                      </h4>
+                    </div>
+                    {selectedCall.transcript ? (
+                      <div className="bg-black/30 rounded-xl p-4 max-h-64 overflow-y-auto">
+                        <pre className="text-gray-200 whitespace-pre-wrap text-sm font-sans">
+                          {selectedCall.transcript}
+                        </pre>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-4">
+                        <a
+                          href={selectedCall.recordingUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="px-6 py-3 rounded-xl bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600 text-white font-semibold transition-all shadow-lg transform hover:scale-105"
+                        >
+                          🎵 Play Recording
+                        </a>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Additional Data */}
+                {selectedCall.metadata && Object.keys(selectedCall.metadata).length > 0 && (
+                  <div className="mt-6 p-6 rounded-2xl bg-gradient-to-br from-orange-500/20 to-yellow-500/20 border border-orange-500/30 backdrop-blur-xl">
+                    <div className="flex items-center gap-3 mb-4">
+                      <span className="text-3xl">📋</span>
+                      <h4 className="text-xl font-bold text-white">Additional Information</h4>
+                    </div>
+                    <pre className="text-gray-200 whitespace-pre-wrap text-sm bg-black/30 p-4 rounded-xl overflow-auto max-h-48">
+                      {JSON.stringify(selectedCall.metadata, null, 2)}
+                    </pre>
+                  </div>
+                )}
+              </div>
+
+              {/* Modal Footer */}
+              <div className="p-6 bg-gradient-to-r from-slate-800/80 to-purple-800/80 border-t border-white/10 flex justify-end gap-3">
+                <button
+                  className="px-6 py-3 rounded-xl font-semibold bg-white/10 hover:bg-white/20 text-white transition-all border border-white/20"
+                  onClick={() => setSelectedCall(null)}
+                >
+                  Close
+                </button>
+                <button
+                  className="px-6 py-3 rounded-xl font-semibold bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white transition-all shadow-lg transform hover:scale-105"
+                  onClick={() => {
+                    // Add functionality to call this number again
+                    setCallPhone(selectedCall.direction === 'inbound' ? selectedCall.from : selectedCall.to);
+                    setActiveTab('voice');
+                    setSelectedCall(null);
+                  }}
+                >
+                  📞 Call Again
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Draft Approval Modal */}
+        {draft && (
+          <div className="fixed inset-0 bg-black/70 backdrop-blur-md flex items-center justify-center z-50 p-4 animate-fadeIn" onClick={() => setDraft(null)}>
+            <div className="bg-gradient-to-br from-slate-900 to-purple-900 rounded-3xl w-full max-w-3xl max-h-[90vh] overflow-hidden shadow-2xl border border-purple-500/30 animate-scaleIn" onClick={(e) => e.stopPropagation()}>
+              <div className="bg-gradient-to-r from-purple-600 via-pink-600 to-blue-600 p-6 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <span className="text-3xl">✉️</span>
+                  <h3 className="text-2xl font-bold text-white">Email Draft Approval</h3>
+                </div>
+                <button
+                  className="w-12 h-12 rounded-xl bg-white/20 hover:bg-white/30 text-white flex items-center justify-center transition-all duration-200 backdrop-blur-xl"
+                  onClick={() => setDraft(null)}
+                >
+                  <span className="text-2xl">✕</span>
+                </button>
+              </div>
+
+              <div className="p-8 overflow-y-auto max-h-[calc(90vh-200px)] space-y-6">
+                <label className="block">
+                  <span className="text-white font-semibold mb-2 block">To:</span>
+                  <input
+                    className="w-full px-5 py-3 rounded-xl bg-white/10 border border-white/20 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all backdrop-blur-xl"
+                    value={draft.to.join(', ')}
+                    onChange={e => setDraft({ ...draft, to: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })}
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-white font-semibold mb-2 block">Subject:</span>
+                  <input
+                    className="w-full px-5 py-3 rounded-xl bg-white/10 border border-white/20 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all backdrop-blur-xl"
+                    value={draft.subject}
+                    onChange={e => setDraft({ ...draft, subject: e.target.value })}
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-white font-semibold mb-2 block">Message:</span>
+                  <textarea
+                    className="w-full px-5 py-3 rounded-xl bg-white/10 border border-white/20 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all backdrop-blur-xl resize-none"
+                    rows={10}
+                    value={draft.text}
+                    onChange={e => setDraft({ ...draft, text: e.target.value })}
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-white font-semibold mb-2 block">Schedule (optional):</span>
+                  <input
+                    type="datetime-local"
+                    className="w-full px-5 py-3 rounded-xl bg-white/10 border border-white/20 text-white focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all backdrop-blur-xl"
+                    value={scheduleISO.slice(0, 16)}
+                    onChange={e => setScheduleISO(e.target.value ? new Date(e.target.value).toISOString() : '')}
+                  />
+                  {draft.send_at_iso && !scheduleISO && (
+                    <small className="text-gray-400 text-sm mt-2 block">Draft suggested: {draft.send_at_iso}</small>
+                  )}
+                </label>
+              </div>
+
+              <div className="p-6 bg-gradient-to-r from-slate-800/80 to-purple-800/80 border-t border-white/10 flex gap-3 justify-end">
+                <button
+                  className="px-6 py-3 rounded-xl font-semibold bg-white/10 hover:bg-white/20 text-white transition-all border border-white/20"
+                  onClick={() => setDraft(null)}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="px-6 py-3 rounded-xl font-semibold bg-white/10 hover:bg-white/20 text-white transition-all border border-white/20 disabled:opacity-50"
+                  disabled={busy}
+                  onClick={async () => {
+                    try {
+                      setBusy(true);
+                      setError('');
+                      const again = await runAgent({
+                        goal: `Please regenerate an improved version of this email draft. Keep the same intent.\n\nCurrent draft:\nTo: ${draft.to.join(', ')}\nSubject: ${draft.subject}\nBody:\n${draft.text}`
+                      });
+                      setResult(again);
+                      const m2 = extractJsonObject(again?.output || "");
+                      if (m2 && (m2.type === "email_draft" || (m2.subject && (m2.text || m2.html)))) {
+                        const toArr = Array.isArray(m2.to) ? m2.to : typeof m2.to === "string" ? m2.to.split(/[,;\n]/g).map(s => s.trim()).filter(Boolean) : draft.to;
+                        setDraft({
+                          to: toArr,
+                          subject: m2.subject || "",
+                          text: m2.text || "",
+                          html: m2.html || "",
+                          send_at_iso: m2.send_at_iso || ""
+                        });
+                        setScheduleISO(m2.send_at_iso || scheduleISO);
+                      }
+                    } catch (e) {
+                      setError(String(e?.message || e));
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  🔄 Regenerate
+                </button>
+                <button
+                  className="px-6 py-3 rounded-xl font-semibold bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white transition-all shadow-lg transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed"
+                  disabled={busy || draft.to.length === 0 || !draft.subject || (!draft.text && !draft.html)}
+                  onClick={async () => {
+                    try {
+                      setBusy(true);
+                      setError('');
+                      setEmailResp(null);
+                      if (scheduleISO) {
+                        const data = await window.api.scheduleEmail({
+                          whenISO: scheduleISO,
+                          to: draft.to.length === 1 ? draft.to[0] : draft.to,
+                          subject: draft.subject,
+                          text: draft.text,
+                          html: draft.html
+                        });
+                        setEmailResp(data);
+                      } else {
+                        const data = await window.api.sendEmail({
+                          to: draft.to.length === 1 ? draft.to[0] : draft.to,
+                          subject: draft.subject,
+                          text: draft.text,
+                          html: draft.html
+                        });
+                        setEmailResp(data);
+                      }
+                      setDraft(null);
+                    } catch (e) {
+                      setError(String(e?.message || e));
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  {scheduleISO ? '📅 Approve & Schedule' : '🚀 Approve & Send Now'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Error Section */}
+        {error && (
+          <section className="backdrop-blur-xl bg-red-500/20 rounded-3xl p-6 border border-red-500/50 shadow-2xl animate-shake mb-8">
+            <div className="flex items-center gap-4">
+              <span className="text-4xl">⚠️</span>
+              <div>
+                <h3 className="text-xl font-bold text-red-200 mb-1">Error Occurred</h3>
+                <p className="text-red-100">{error}</p>
+              </div>
+            </div>
+          </section>
+        )}
+
+        <audio ref={audioRef} src="/beep.mp3" preload="auto" />
+      </div>
+
+      <style>{`
+        @keyframes float {
+          0%, 100% { transform: translate(0, 0) scale(1); }
+          50% { transform: translate(30px, 30px) scale(1.05); }
+        }
+        @keyframes fadeIn {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
+        @keyframes slideUp {
+          from { opacity: 0; transform: translateY(30px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes scaleIn {
+          from { opacity: 0; transform: scale(0.9); }
+          to { opacity: 1; transform: scale(1); }
+        }
+        @keyframes shake {
+          0%, 100% { transform: translateX(0); }
+          25% { transform: translateX(-10px); }
+          75% { transform: translateX(10px); }
+        }
+        .animate-float { animation: float 8s ease-in-out infinite; }
+        .animate-fadeIn { animation: fadeIn 0.3s ease-out; }
+        .animate-slideUp { animation: slideUp 0.5s ease-out; }
+        .animate-scaleIn { animation: scaleIn 0.3s ease-out; }
+        .animate-shake { animation: shake 0.5s ease-out; }
+      `}</style>
+    </div>
+  )
+}

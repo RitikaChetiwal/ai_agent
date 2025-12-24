@@ -1,0 +1,109 @@
+[
+  {
+    "sid": "CAaabd208545c481946022aeb34b40b28f",
+    "transcripts": [
+      {
+        "ts": 1762434653905,
+        "from": "caller",
+        "text": "book an appointment",
+        "confidence": "0.7267193"
+      }
+    ],
+    "direction": "inbound",
+    "from": "+14058140717",
+    "to": "+918287275266",
+    "startedAt": 1762434645888,
+    "status": "completed",
+    "lastEventAt": "Thu, 06 Nov 2025 13:10:58 +0000",
+    "durationSec": 27,
+    "endedAt": 1762434658619
+  },
+  {
+    "sid": "CA66598d5b373cc195deadbdab44cda08b",
+    "transcripts": [
+      {
+        "ts": 1762434728712,
+        "from": "caller",
+        "text": "book an appointment",
+        "confidence": "0.75181156"
+      }
+    ],
+    "direction": "inbound",
+    "from": "+14058140717",
+    "to": "+918287275266",
+    "startedAt": 1762434720138,
+    "status": "completed",
+    "lastEventAt": "Thu, 06 Nov 2025 13:12:13 +0000",
+    "durationSec": 26,
+    "endedAt": 1762434733416
+  },
+  {
+    "sid": "CA0befc98c3d628517377fed4bbe34cb12",
+    "transcripts": [
+      {
+        "ts": 1762495194642,
+        "from": "caller",
+        "text": "Hello.",
+        "confidence": "0.51674753"
+      }
+    ],
+    "direction": "inbound",
+    "from": "+14058140717",
+    "to": "+919717505573",
+    "startedAt": 1762495188135,
+    "status": "completed",
+    "lastEventAt": "Fri, 07 Nov 2025 05:59:59 +0000",
+    "durationSec": 19,
+    "endedAt": 1762495199339
+  },
+  {
+    "sid": "CAe37abfb44e7fc56b96b1da0dfe634d83",
+    "transcripts": [],
+    "direction": "outbound",
+    "from": "+14058140717",
+    "to": "+919717505573",
+    "startedAt": 1762495220641,
+    "status": "completed",
+    "lastEventAt": "Fri, 07 Nov 2025 06:00:50 +0000",
+    "durationSec": 13,
+    "endedAt": 1762495250833
+  },
+  {
+    "sid": "CA147ee8ee67d1ebbd308a32cb7291ce39",
+    "transcripts": [
+      {
+        "ts": 1762495294581,
+        "from": "caller",
+        "text": "What can you do for me?",
+        "confidence": "0.9158945"
+      }
+    ],
+    "direction": "inbound",
+    "from": "+14058140717",
+    "to": "+919717505573",
+    "startedAt": 1762495283364,
+    "status": "completed",
+    "lastEventAt": "Fri, 07 Nov 2025 06:01:38 +0000",
+    "durationSec": 30,
+    "endedAt": 1762495299246
+  },
+  {
+    "sid": "CA43c48ce9f4dd4366a497993b6402a8d6",
+    "transcripts": [
+      {
+        "ts": 1762495407068,
+        "from": "caller",
+        "text": "Hello.",
+        "confidence": "0.5546714"
+      }
+    ],
+    "direction": "inbound",
+    "from": "+14058140717",
+    "to": "+919717505573",
+    "startedAt": 1762495395849,
+    "status": "completed",
+    "lastEventAt": "Fri, 07 Nov 2025 06:03:31 +0000",
+    "durationSec": 25,
+    "endedAt": 1762495411456
+  }
+]

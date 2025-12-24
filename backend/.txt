@@ -1,0 +1,19 @@
+ExoPhones	
+01141194077
+
+TRIAL NUMBER
+09513886363
+
+Pin: 9717-5055-73
+
+
+App id: 1111319
+
+
+Account SID: 4thdimension1
+Account region: Singapore
+Subdomain: api.exotel.com
+
+Api key: 391b200f0eee024692a45c0ccf2f53d6595dcaf09d901b9d
+
+Api token: f3d079095eb1941ae730f29655870aad07f5c7131bff55db
