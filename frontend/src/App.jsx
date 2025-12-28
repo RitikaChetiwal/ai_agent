@@ -102,17 +102,17 @@ export default function App() {
     }
   };
 
-  useEffect(() => {
-    const es = new EventSource(`${API}/events`);
-    es.addEventListener("alarm", (ev) => {
-      const payload = JSON.parse(ev.data);
-      audioRef.current?.play?.();
-      if (Notification.permission === "granted") {
-        new Notification("Reminder", { body: payload.message });
-      }
-    });
-    return () => es.close();
-  }, []);
+  // useEffect(() => {
+  //   const es = new EventSource(`${API}/events`);
+  //   es.addEventListener("alarm", (ev) => {
+  //     const payload = JSON.parse(ev.data);
+  //     audioRef.current?.play?.();
+  //     if (Notification.permission === "granted") {
+  //       new Notification("Reminder", { body: payload.message });
+  //     }
+  //   });
+  //   return () => es.close();
+  // }, []);
 
   useEffect(() => {
     if (Notification && Notification.permission === "default") {
